@@ -40,7 +40,7 @@ def _build_full_manifest(bot_name: str, bot_description: str) -> dict:
     return {
         "_metadata": {
             "major_version": 1,
-            "minor_version": 1,
+            "minor_version": 2,
         },
         "display_information": {
             "name": bot_name[:35],
@@ -51,6 +51,11 @@ def _build_full_manifest(bot_name: str, bot_description: str) -> dict:
             "bot_user": {
                 "display_name": bot_name[:80],
                 "always_online": True,
+            },
+            "app_home": {
+                "home_tab_enabled": False,
+                "messages_tab_enabled": True,
+                "messages_tab_read_only_enabled": False,
             },
             "slash_commands": slashes,
             "assistant_view": {
@@ -69,9 +74,11 @@ def _build_full_manifest(bot_name: str, bot_description: str) -> dict:
                     "files:read",
                     "files:write",
                     "groups:history",
+                    "groups:read",
                     "im:history",
                     "im:read",
                     "im:write",
+                    "mpim:read",
                     "users:read",
                 ],
             },
