@@ -1260,6 +1260,7 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    review_policy: Optional[dict] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1323,6 +1324,12 @@ def create_task(
             "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
         ).fetchone()
         if row:
+            from hermes_cli.kanban_review_policy import inherited_policy, validate_policy, get_review_state, ReviewPolicyError
+            requested = inherited_policy(conn, review_policy, (*parents, creator_task_id, os.environ.get("HERMES_KANBAN_TASK")))
+            if requested is not None:
+                existing = get_review_state(conn, row["id"])
+                if existing is None or existing["policy"] != validate_policy(requested, assignee):
+                    raise ReviewPolicyError("idempotency key matches a task with a different review policy")
             return row["id"]
 
     now = int(time.time())
@@ -1372,6 +1379,11 @@ def create_task(
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
                     ),
                 )
+                from hermes_cli.kanban_review_policy import create_policy
+                from hermes_cli.kanban_review_policy import inherited_policy
+                effective_policy = inherited_policy(conn, review_policy,
+                    (*parents, creator_task_id, os.environ.get("HERMES_KANBAN_TASK")))
+                create_policy(conn, task_id, effective_policy, assignee)
                 for pid in parents:
                     _link(conn, pid, task_id)
                 _append_event(
@@ -1553,6 +1565,8 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
         ).fetchone()
         if not row:
             return False
+        from hermes_cli.kanban_review_policy import guard_task_mutation
+        guard_task_mutation(conn, task_id, {"assignee": profile})
         if row["claim_lock"] is not None and row["status"] == "running":
             raise RuntimeError(
                 f"cannot reassign {task_id}: currently running (claimed). "
@@ -1603,6 +1617,8 @@ def _set_task_override(
             return False
         if status == "archived":
             raise RuntimeError(f"{archived_msg} on archived task {task_id}")
+        from hermes_cli.kanban_review_policy import guard_task_mutation
+        guard_task_mutation(conn, task_id, changed_fields)
         conn.execute(sql, (*params, task_id))
         _append_event(conn, task_id, event_kind, payload)
     notify_task_updated(conn, task_id, changed_fields)
@@ -1878,6 +1894,8 @@ def add_attachment(
     now = int(time.time())
     with write_txn(conn):
         _require_task(conn, task_id)
+        from hermes_cli.kanban_review_policy import guard_task_mutation
+        guard_task_mutation(conn, task_id, ("attachments",))
         cur = conn.execute(
             "INSERT INTO task_attachments "
             "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at) "
@@ -1906,6 +1924,8 @@ def delete_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[
         att = get_attachment(conn, attachment_id)
         if att is None:
             return None
+        from hermes_cli.kanban_review_policy import guard_task_mutation
+        guard_task_mutation(conn, att.task_id, ("attachments",))
         conn.execute("DELETE FROM task_attachments WHERE id = ?", (attachment_id,))
         has_remaining_blob_reference = conn.execute(
             "SELECT 1 FROM task_attachments WHERE stored_path = ? LIMIT 1",
@@ -2306,6 +2326,9 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        from hermes_cli.kanban_review_policy import prepare_review_claim, record_review_claim
+        if not prepare_review_claim(conn, task_id):
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2322,6 +2345,7 @@ def claim_review_task(
         )
         if run_id is None:
             return None
+        record_review_claim(conn, task_id, run_id)
         return get_task(conn, task_id)
 
 
@@ -2597,6 +2621,11 @@ def reassign_task(
 ) -> bool:
     """Reassign (None unassigns); a running task is refused unless
     ``reclaim_first`` releases its claim — the "this profile's model is broken" path."""
+    from hermes_cli.kanban_review_policy import get_review_state
+    if get_review_state(conn, task_id) is not None:
+        # Protected assignees only change before execution. Reclaiming first
+        # would stop a worker before the policy rejection, even on a rejected request.
+        return assign_task(conn, task_id, profile)
     if reclaim_first:
         # Safe to call even if nothing to reclaim.
         reclaim_task(conn, task_id, reason=reason or "reassign")
@@ -2747,6 +2776,11 @@ def complete_task(
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
+    from hermes_cli.kanban_review_policy import get_review_state, complete_review
+    if get_review_state(conn, task_id) is not None:
+        return complete_review(conn, task_id, expected_run_id=expected_run_id, result=result,
+                               summary=summary, metadata=metadata, force=force,
+                               fire_lifecycle_hook=fire_lifecycle_hook)
     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     _gate_empty_completion(conn, task_id, result=result, summary=summary)
@@ -3143,6 +3177,9 @@ def edit_task(
         status = _task_status(conn, task_id)
         if status is None or (result is not None and status != "done"):
             return False
+        from hermes_cli.kanban_review_policy import guard_task_mutation
+        guard_task_mutation(conn, task_id, {k: v for k, v in {"title": title, "body": body,
+                            "priority": priority, "result": result}.items() if v is not None})
         assignments = []
         params = []
         for field, value in (("title", title), ("body", body), ("priority", priority)):
@@ -3226,6 +3263,9 @@ def block_task(
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
     with write_txn(conn):
+        from hermes_cli.kanban_review_policy import escalate_review
+        if kind == "needs_input" and escalate_review(conn, task_id, expected_run_id, reason):
+            return True
         cur_row = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
@@ -3398,7 +3438,11 @@ def request_review(
                     "(worker ownership) or force=True (explicit operator "
                     "override) instead of clearing the live run's claim",
                 )
-            if reviewer is None:
+            from hermes_cli.kanban_review_policy import get_review_state, submission_reviewer, record_submission
+            protected_review = get_review_state(conn, task_id) is not None
+            if protected_review:
+                reviewer = submission_reviewer(conn, task_id, expected_run_id)
+            if reviewer is None and not protected_review:
                 reviewer = _prior_reviewer(conn, task_id)
                 if reviewer is False:
                     return _ret(
@@ -3456,6 +3500,7 @@ def request_review(
                 summary=summary, metadata=metadata, synthesize=bool(summary or metadata),
                 profile=implementer,
             )
+            record_submission(conn, task_id, run_id, implementer, summary)
             payload: dict = {
                 "summary": _first_line(summary, 400) or None,
                 "implementer": implementer,
@@ -3503,6 +3548,10 @@ def request_changes(
         return False, "reason is required"
 
     with write_txn(conn):
+        from hermes_cli.kanban_review_policy import handle_changes
+        handled = handle_changes(conn, task_id, reason, expected_run_id)
+        if handled is not None:
+            return handled
         task_row = conn.execute(
             "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
@@ -3692,6 +3741,9 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
     not a block; only :func:`complete_task` clears them)."""
     now = int(time.time())
     with write_txn(conn):
+        from hermes_cli.kanban_review_policy import get_review_state, handle_changes
+        if get_review_state(conn, task_id) is not None:
+            return handle_changes(conn, task_id, "operator requested revision", None)[0]
         _reclaim_dangling_run(
             conn, task_id, statuses=("review",), now=now,
             note="invariant recovery on review reopen",
@@ -3923,7 +3975,8 @@ def archive_task(conn: sqlite3.Connection, task_id: str, *, signal_fn=None) -> b
 def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
     """Delete every row referencing ``task_id`` (schema has no ON DELETE CASCADE)."""
     conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
-    for table in ("task_comments", "task_events", "task_runs", "kanban_notify_subs"):
+    for table in ("task_comments", "task_events", "task_runs", "kanban_notify_subs",
+                  "task_review_policies", "task_review_approvals"):
         conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
 
 
@@ -3992,6 +4045,13 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    from hermes_cli.kanban_review_policy import get_review_state
+    review = get_review_state(conn, task_id)
+    if review is not None:
+        lines.append("Review policy: " + json.dumps(review, ensure_ascii=False))
+        lines.append("Implementers must submit with kanban_request_review; direct completion is forbidden. "
+                     "Reviewers may approve only their current independent review run or request changes. "
+                     "Human approval is an explicit operator action.")
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)

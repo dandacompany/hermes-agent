@@ -292,6 +292,11 @@ _SPECS = [
     ], help="Attach a local file to a task"),
     _cmd("attachments", [_TASK_ID, _json_flag()], help="List a task's attachments"),
     _cmd("attach-rm", [_arg("attachment_id", type=int)], help="Delete an attachment by id"),
+    _cmd("approve", [
+        _TASK_ID,
+        _arg("--submission-id", required=True, help="Current review submission id"),
+        _arg("--request-id", required=True, help="Unique idempotency key for this operator approval"),
+    ], help="Explicitly approve the current protected submission (operator only)"),
     _cmd("complete", [
         _arg("task_ids", nargs="+", help="One or more task ids (only --result applies to all of them)"),
         _arg("--result", help="Result summary"),

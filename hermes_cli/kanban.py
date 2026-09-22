@@ -216,7 +216,7 @@ _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
-    "request-review", "request-changes", "reopen-review",
+    "request-review", "request-changes", "reopen-review", "approve",
     "gc",
 })
 
@@ -494,12 +494,15 @@ def _cmd_show(args: argparse.Namespace) -> int:
         runs = kb.list_runs(conn, args.task_id, **rsk)
         # Workers hand off via task_runs.summary; tasks.result stays NULL unless set.
         latest_summary = kb.latest_summary(conn, args.task_id)
+        from hermes_cli.kanban_review_policy import get_review_state
+        review = get_review_state(conn, args.task_id)
         if not want_json:
             graph = kb.task_graph_context(conn, task.id)
 
     if want_json:
         _print_json({
             "task": _task_to_dict(task), "latest_summary": latest_summary, "parents": parents, "children": children,
+            "review": review,
             "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
@@ -512,6 +515,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"Task {task.id}: {task.title}")
     field("status", task.status)
     field("assignee", task.assignee or "-")
+    if review is not None:
+        field("review", json.dumps(review, ensure_ascii=False))
     if task.tenant:
         field("tenant", task.tenant)
     field("workspace", f"{task.workspace_kind}" + (f" @ {task.workspace_path}" if task.workspace_path else ""))
@@ -896,6 +901,20 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     if rejection is not None:
         return f"kanban: goal {handoff} of {tid} rejected by judge: {rejection}. {continue_hint}"
     return None
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    """Explicit trusted-local operator approval, unavailable to worker processes."""
+    import getpass
+    from hermes_cli.kanban_review_policy import approve_task
+    try:
+        with kbc.connect_closing() as conn:
+            state = approve_task(conn, args.task_id, actor_id="local:" + getpass.getuser(),
+                                 submission_id=args.submission_id, request_id=args.request_id)
+        print(json.dumps(state, ensure_ascii=False))
+        return 0
+    except ValueError as exc:
+        return _err(str(exc), 1)
 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
@@ -1332,7 +1351,7 @@ _HANDLERS = {
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
-    "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
+    "approve": _cmd_approve, "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,

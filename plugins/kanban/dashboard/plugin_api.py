@@ -656,6 +656,23 @@ def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Option
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
+        from hermes_cli.kanban_review_policy import get_review_state, patch_review_task
+        if get_review_state(conn, task_id) is not None:
+            fields = {name: getattr(payload, name) for name in
+                      ("title", "body", "priority", "assignee", "model_override", "provider_override", "reasoning_effort")
+                      if getattr(payload, name) is not None}
+            if payload.clear_model_override:
+                fields.update(model_override=None, provider_override=None)
+            if payload.clear_reasoning_effort:
+                fields["reasoning_effort"] = None
+            with _map_errors(409, ValueError, RuntimeError):
+                if payload.status is not None:
+                    if fields:
+                        raise ValueError("protected status changes must be separate from field edits")
+                    _patch_status(conn, task_id, payload, False)
+                else:
+                    patch_review_task(conn, task_id, fields=fields)
+            return {"task": _task_dict(kanban_db.get_task(conn, task_id))}
         # For a combined assignee+review patch, request_review must capture the
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
@@ -707,6 +724,8 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
     terminations: list[tuple[Optional[int], Optional[str], Optional[int]]] = []
     effective_status = new_status
     with kanban_db.write_txn(conn):
+        from hermes_cli.kanban_review_policy import guard_task_mutation
+        guard_task_mutation(conn, task_id, {"status": new_status})
         prev = conn.execute(
             "SELECT status, current_run_id, worker_pid, claim_lock, worker_started_at FROM tasks WHERE id = ?",
             (task_id,)).fetchone()

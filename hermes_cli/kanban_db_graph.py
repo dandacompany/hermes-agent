@@ -210,5 +210,8 @@ def _insert_decomposed_child(
     _append_event(
         conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id},
     )
+    from hermes_cli.kanban_review_policy import create_policy, inherited_policy
+    policy = inherited_policy(conn, child.get("review_policy"), (root_id,))
+    create_policy(conn, new_id, policy, _canonical_assignee(child.get("assignee")))
     inherit_creator_origin(conn, new_id, root_id, created_at=now)
     return new_id

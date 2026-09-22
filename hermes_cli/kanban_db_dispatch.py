@@ -1728,11 +1728,14 @@ def dispatch_profile_allowlist_summary() -> str:
 
 
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
-    rows = conn.execute(
-        "SELECT DISTINCT assignee FROM tasks "
-        "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
-        (status,),
-    ).fetchall()
+    if status == "review":
+        rows = _lane_rows(conn, status)
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT assignee FROM tasks "
+            "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
+            (status,),
+        ).fetchall()
     if not rows:
         return False
     profile_exists = _profile_exists_fn()
@@ -2221,11 +2224,15 @@ def _tick_spawn_budget(
 
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
-    return conn.execute(
+    rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    if status != "review":
+        return rows
+    from hermes_cli.kanban_review_policy import review_dispatch_reason
+    return [row for row in rows if review_dispatch_reason(conn, row["id"]) is None]
 
 
 def _any_spawnable_review(
