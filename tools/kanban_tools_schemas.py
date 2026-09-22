@@ -214,9 +214,11 @@ KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
         "summary": _prop("string", (
-                "What was implemented and how it was verified, in one or "
-                "two sentences — shown to the reviewer. Don't paste "
-                "the whole diff; the reviewer has the board and the PR."
+                "Include the full text of a textual deliverable when it is not "
+                "provided in durable artifacts; saying it was written is not the result. "
+                "Also explain what was implemented and how it was verified, briefly. "
+                "Shown to the reviewer. Don't paste the whole diff; reference the PR "
+                "or preserved artifacts so the reviewer can inspect the actual work."
         )),
         "reviewer": _prop("string", (
                 "Optional reviewer profile. When provided, the task is "

@@ -513,3 +513,26 @@ def test_human_receipt_preserves_display_name_without_changing_idempotence(conn)
     approved = rp.approve_task(conn, tid, actor_name="Dante", **args)
     assert approved["approval"]["actor_name"] == "Dante"
     assert rp.approve_task(conn, tid, actor_name="Updated name", **args) == approved
+
+
+def test_text_deliverable_handoff_and_review_context(conn, monkeypatch):
+    from hermes_cli import profiles
+    from tools.kanban_tools_schemas import KANBAN_REQUEST_REVIEW_SCHEMA
+    monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
+    tid = kb.create_task(conn, title="Meeting notice", body="Write two Korean sentences.",
+                         assignee="writer", review_policy=AGENT)
+    context = kb.build_worker_context(conn, tid)
+    assert "full text of the deliverable" in context
+    assert "durable artifacts" in context
+    description = KANBAN_REQUEST_REVIEW_SCHEMA["parameters"]["properties"]["summary"]["description"]
+    assert "full text" in description
+    assert "whole diff" in description
+    run = kb.claim_task(conn, tid)
+    deliverable = "회의 안건과 주요 쟁점을 정리해 주세요. 관련 참고 자료와 데이터를 준비해 주세요."
+    assert kb.request_review(conn, tid, summary=deliverable, expected_run_id=run.current_run_id)
+    assert kb.claim_review_task(conn, tid) is not None
+    context = kb.build_worker_context(conn, tid)
+    assert deliverable in context
+    assert "completion claim is not evidence" in context
+    assert "request changes" in context
+    assert kb.get_task(conn, tid).result == deliverable

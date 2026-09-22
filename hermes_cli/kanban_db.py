@@ -4052,6 +4052,12 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
         lines.append("Implementers must submit with kanban_request_review; direct completion is forbidden. "
                      "Reviewers may approve only their current independent review run or request changes. "
                      "Human approval is an explicit operator action.")
+        lines.append("Submission evidence: for textual work, put the full text of the deliverable "
+                     "in kanban_request_review.summary, or attach durable artifacts containing it. "
+                     "A completion claim is not the deliverable. Reviewers must read the actual "
+                     "submitted text or artifacts and compare them with the task body and acceptance "
+                     "criteria; a completion claim is not evidence. If the deliverable is missing "
+                     "or does not meet those criteria, request changes rather than approve.")
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
