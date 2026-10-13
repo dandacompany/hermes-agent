@@ -32,14 +32,15 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.release_tag || 'intel-macos-v0.21.7-r1' }}
       ASSET_NAME: ${{ inputs.asset_name || 'Hermes-Setup-0.21.7-mac-x64.dmg' }}
-      HERMES_HOME: ${{ runner.temp }}/hermes-home
-      EVIDENCE: ${{ runner.temp }}/intel-smoke-evidence
-      SMOKE_APP: ${{ runner.temp }}/intel-smoke/Hermes.app
     steps:
       - name: Record native host and validate release inputs
         shell: bash
         run: |
           set -euo pipefail
+          export HERMES_HOME="$RUNNER_TEMP/hermes-home"
+          export EVIDENCE="$RUNNER_TEMP/intel-smoke-evidence"
+          export SMOKE_APP="$RUNNER_TEMP/intel-smoke/Hermes.app"
+          printf 'HERMES_HOME=%s\nEVIDENCE=%s\nSMOKE_APP=%s\n' "$HERMES_HOME" "$EVIDENCE" "$SMOKE_APP" >> "$GITHUB_ENV"
           mkdir -p "$EVIDENCE" "$HERMES_HOME" "$RUNNER_TEMP/intel-smoke"
           {
             uname -a

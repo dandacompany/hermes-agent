@@ -9,7 +9,7 @@ building and distributing the `x86_64-apple-darwin` launcher.
 
 ## Install
 
-Use `Hermes-Setup-0.21.7-mac-x64.dmg` on a 64-bit Intel Mac running macOS 12 or
+Use `Hermes-Setup-0.21.7-r2-mac-x64.dmg` on a 64-bit Intel Mac running macOS 12 or
 newer. Open the disk image, copy `Hermes.app` to Applications, and launch it.
 If Hermes is already installed, back it up before replacing the application.
 
@@ -41,6 +41,7 @@ root, install only the installer workspace and the Intel Rust target:
 ```sh
 npm ci --workspace apps/bootstrap-installer --include-workspace-root=false --no-audit --no-fund
 rustup target add x86_64-apple-darwin
+export CARGO_TARGET_DIR="$HOME/.cache/hermes-bootstrap-intel-target"
 HERMES_BUILD_PIN_COMMIT=71d34bad1045610252eda02ee79549436896e784 \
 HERMES_BUILD_PIN_BRANCH=main \
 npm run tauri:build --workspace apps/bootstrap-installer -- \
@@ -48,7 +49,11 @@ npm run tauri:build --workspace apps/bootstrap-installer -- \
 ```
 
 Outputs are under
-`apps/bootstrap-installer/src-tauri/target/x86_64-apple-darwin/release/bundle/`.
+`$CARGO_TARGET_DIR/x86_64-apple-darwin/release/bundle/`.
+Keep the Cargo target directory outside the source tree so formatters cannot
+modify generated assets. Tauri caches Brotli-compressed frontend files using
+`.html`, `.js`, and `.css` extensions; they must never be formatted as text.
+If these files were modified, use a fresh target directory and rebuild.
 For a distributable build, set `APPLE_SIGNING_IDENTITY` to your Developer ID
 Application certificate and use [Tauri's macOS signing and notarization process](https://v2.tauri.app/distribute/sign/macos/).
 Do not redistribute an unsigned local build as a notarized release.
@@ -56,7 +61,7 @@ Do not redistribute an unsigned local build as a notarized release.
 ## Verify
 
 ```sh
-app=apps/bootstrap-installer/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Hermes.app
+app="$CARGO_TARGET_DIR/x86_64-apple-darwin/release/bundle/macos/Hermes.app"
 lipo -archs "$app/Contents/MacOS/Hermes-Setup"  # must be x86_64
 codesign --verify --deep --strict "$app"
 xcrun stapler validate "$app"
@@ -75,3 +80,16 @@ For release acceptance, use a clean Intel Mac: run setup through completion,
 launch Desktop, open its integrated terminal, and send a chat with a configured
 provider. Record the macOS version and result. Architecture inspection,
 Gatekeeper acceptance, and a Rosetta launch are narrower checks.
+
+## Installer revisions
+
+Revision r2 replaces r1, which displayed `asset not found: index.html` at startup.
+A local formatter had damaged a compressed HTML build artifact; rebuilding
+from a fresh external Cargo target directory restores the embedded frontend.
+The application version and pinned upstream installation commit are unchanged.
+
+The `Intel installer UI smoke` workflow downloads a published DMG and opens it
+on a native Intel macOS runner. It captures the app window and checks the welcome
+text and Install button using Vision OCR, rejecting missing assets and capture
+failures. This verifies the setup screen only; it does not click Install or
+claim that the complete Desktop installation has been tested.

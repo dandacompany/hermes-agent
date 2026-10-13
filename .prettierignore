@@ -2,3 +2,8 @@
 # team approval when lockfiles change, so an autofix PR touching one
 # would hang waiting for review.
 package-lock.json
+
+# Tauri stores Brotli-compressed assets under their original extensions.
+# Treat these generated files as binary; formatting them corrupts the app.
+apps/bootstrap-installer/src-tauri/target/
+apps/bootstrap-installer/dist/
