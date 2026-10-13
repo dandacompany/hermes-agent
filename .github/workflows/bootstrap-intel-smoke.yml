@@ -1,0 +1,201 @@
+name: Intel installer UI smoke
+
+# Exercise the published DMG on native Intel hardware, including its embedded
+# frontend. This stops at the setup screen and never starts an installation.
+on:
+  push:
+    branches: [desktop/intel-macos-v0.21.7]
+    paths:
+      - .github/workflows/bootstrap-intel-smoke.yml
+      - apps/bootstrap-installer/**
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Fork release containing the DMG to verify
+        required: true
+        default: intel-macos-v0.21.7-r1
+        type: string
+      asset_name:
+        description: Exact DMG filename (r2 uses Hermes-Setup-0.21.7-r2-mac-x64.dmg)
+        required: true
+        default: Hermes-Setup-0.21.7-mac-x64.dmg
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  installer-ui:
+    name: Published installer on native Intel macOS
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || 'intel-macos-v0.21.7-r1' }}
+      ASSET_NAME: ${{ inputs.asset_name || 'Hermes-Setup-0.21.7-mac-x64.dmg' }}
+      HERMES_HOME: ${{ runner.temp }}/hermes-home
+      EVIDENCE: ${{ runner.temp }}/intel-smoke-evidence
+      SMOKE_APP: ${{ runner.temp }}/intel-smoke/Hermes.app
+    steps:
+      - name: Record native host and validate release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE" "$HERMES_HOME" "$RUNNER_TEMP/intel-smoke"
+          {
+            uname -a
+            sw_vers
+            printf 'release=%s\nasset=%s\n' "$RELEASE_TAG" "$ASSET_NAME"
+          } | tee "$EVIDENCE/host.txt"
+          test "$(uname -m)" = x86_64
+          python3 - <<'PY'
+          import os
+          import re
+          assert re.fullmatch(r"intel-macos-v[0-9][A-Za-z0-9._-]*", os.environ["RELEASE_TAG"]), "Invalid release tag"
+          assert re.fullmatch(r"Hermes-Setup-[A-Za-z0-9._-]+-mac-x64\.dmg", os.environ["ASSET_NAME"]), "Invalid DMG filename"
+          PY
+
+      - name: Download, verify, and extract published DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$RUNNER_TEMP/intel-smoke/$ASSET_NAME"
+          url="https://github.com/dandacompany/hermes-agent/releases/download/$RELEASE_TAG/$ASSET_NAME"
+          printf '%s\n' "$url" > "$EVIDENCE/download-url.txt"
+          curl --fail --location --retry 3 --output "$dmg" "$url"
+          shasum -a 256 "$dmg" | tee "$EVIDENCE/dmg-sha256.txt"
+          hdiutil verify "$dmg" > "$EVIDENCE/dmg-verify.txt" 2>&1
+          mountpoint="$RUNNER_TEMP/intel-smoke/mounted"
+          mkdir -p "$mountpoint"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mountpoint" > "$EVIDENCE/dmg-attach.txt" 2>&1
+          trap 'hdiutil detach "$mountpoint" >/dev/null 2>&1 || true' EXIT
+          ditto "$mountpoint/Hermes.app" "$SMOKE_APP"
+          hdiutil detach "$mountpoint"
+          trap - EXIT
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$SMOKE_APP/Contents/Info.plist")"
+          binary="$SMOKE_APP/Contents/MacOS/$executable"
+          file "$binary" | tee "$EVIDENCE/binary.txt"
+          lipo -verify_arch x86_64 "$binary"
+          codesign --verify --deep --strict --verbose=2 "$SMOKE_APP" > "$EVIDENCE/codesign.txt" 2>&1
+          spctl --assess --type execute --verbose=2 "$SMOKE_APP" > "$EVIDENCE/gatekeeper.txt" 2>&1
+
+      - name: Compile window capture and Vision OCR helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/intel-smoke/capture.swift" <<'SWIFT'
+          import Foundation
+          import CoreGraphics
+          import Vision
+
+          let pid = Int(CommandLine.arguments[1])!
+          let prefix = CommandLine.arguments[2]
+          let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+          let owned = windows.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid }
+          let data = try JSONSerialization.data(withJSONObject: owned, options: [.prettyPrinted, .sortedKeys])
+          try data.write(to: URL(fileURLWithPath: prefix + "-windows.json"))
+          let visible = owned.filter {
+              guard let bounds = $0[kCGWindowBounds as String] as? [String: Any] else { return false }
+              return (bounds["Width"] as? Double ?? 0) >= 600 && (bounds["Height"] as? Double ?? 0) >= 400
+          }
+          guard let window = visible.first, let windowID = window[kCGWindowNumber as String] as? Int else {
+              fputs("No visible installer window for PID \(pid); GUI availability is unverified.\n", stderr)
+              exit(2)
+          }
+          let screenshot = prefix + ".png"
+          let capture = Process()
+          capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+          capture.arguments = ["-x", "-o", "-l", String(windowID), screenshot]
+          try capture.run()
+          capture.waitUntilExit()
+          guard capture.terminationStatus == 0 else {
+              fputs("Window capture failed; screen-recording permission or GUI support may be unavailable.\n", stderr)
+              exit(3)
+          }
+          let request = VNRecognizeTextRequest()
+          request.recognitionLevel = .accurate
+          request.recognitionLanguages = ["en-US"]
+          request.usesLanguageCorrection = false
+          try VNImageRequestHandler(url: URL(fileURLWithPath: screenshot)).perform([request])
+          for observation in request.results ?? [] {
+              if let text = observation.topCandidates(1).first?.string { print(text) }
+          }
+          SWIFT
+          swiftc "$RUNNER_TEMP/intel-smoke/capture.swift" -o "$RUNNER_TEMP/intel-smoke/capture" > "$EVIDENCE/swift-build.txt" 2>&1
+
+      - name: Launch installer and assert its rendered setup screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import plistlib
+          import re
+          import subprocess
+          import time
+
+          evidence = pathlib.Path(os.environ["EVIDENCE"])
+          app = pathlib.Path(os.environ["SMOKE_APP"])
+          helper = pathlib.Path(os.environ["RUNNER_TEMP"]) / "intel-smoke/capture"
+          with (app / "Contents/Info.plist").open("rb") as stream:
+              executable = plistlib.load(stream)["CFBundleExecutable"]
+          result = {"status": "failed", "scope": "Setup screen only; Install was never clicked"}
+          process = None
+          try:
+              with (evidence / "process.log").open("w") as output:
+                  process = subprocess.Popen([str(app / "Contents/MacOS" / executable)], stdout=output, stderr=subprocess.STDOUT)
+                  result["pid"] = process.pid
+                  for attempt in range(1, 13):
+                      time.sleep(5)
+                      if process.poll() is not None:
+                          raise RuntimeError(f"Installer exited before UI verification: {process.returncode}")
+                      prefix = evidence / f"screen-{attempt:02d}"
+                      capture = subprocess.run([str(helper), str(process.pid), str(prefix)], text=True, capture_output=True, timeout=20)
+                      prefix.with_suffix(".txt").write_text(capture.stdout)
+                      prefix.with_suffix(".stderr.txt").write_text(capture.stderr)
+                      if capture.returncode != 0:
+                          continue
+                      text = " ".join(capture.stdout.lower().split())
+                      print(f"OCR attempt {attempt}: {text}")
+                      if re.search(r"asset\s+not\s+found", text):
+                          raise RuntimeError("Rendered installer reports asset not found")
+                      if "the agent that grows with you" in text and re.search(r"\binstall\b", text):
+                          result.update(status="passed", screenshot=prefix.name + ".png", reason="Rendered welcome text and Install button verified with Vision OCR")
+                          break
+                  else:
+                      raise RuntimeError("Setup UI could not be verified. Inspect screenshots, OCR, window metadata, and capture errors; this is not a passing smoke test.")
+          except Exception as error:
+              result["reason"] = str(error)
+              raise
+          finally:
+              if process is not None and process.poll() is None:
+                  process.terminate()
+                  try:
+                      process.wait(timeout=10)
+                  except subprocess.TimeoutExpired:
+                      process.kill()
+                      process.wait(timeout=10)
+              (evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write(f"Intel setup UI smoke: **{result['status']}**\n\n{result.get('reason', '')}\n\n{result['scope']}\n")
+          PY
+
+      - name: Collect installer logs and desktop screenshot
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$EVIDENCE"
+          if [ -d "$HERMES_HOME/logs" ]; then
+            ditto "$HERMES_HOME/logs" "$EVIDENCE/installer-logs"
+          fi
+          /usr/sbin/screencapture -x "$EVIDENCE/desktop.png" > "$EVIDENCE/desktop-capture.log" 2>&1 || true
+
+      - name: Upload native Intel execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: intel-installer-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
