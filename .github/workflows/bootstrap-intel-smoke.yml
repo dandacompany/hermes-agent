@@ -75,7 +75,7 @@ jobs:
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$SMOKE_APP/Contents/Info.plist")"
           binary="$SMOKE_APP/Contents/MacOS/$executable"
           file "$binary" | tee "$EVIDENCE/binary.txt"
-          lipo -verify_arch x86_64 "$binary"
+          lipo "$binary" -verify_arch x86_64
           codesign --verify --deep --strict --verbose=2 "$SMOKE_APP" > "$EVIDENCE/codesign.txt" 2>&1
           spctl --assess --type execute --verbose=2 "$SMOKE_APP" > "$EVIDENCE/gatekeeper.txt" 2>&1
 
