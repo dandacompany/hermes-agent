@@ -13,12 +13,12 @@ on:
       release_tag:
         description: Fork release containing the DMG to verify
         required: true
-        default: intel-macos-v0.21.7-r1
+        default: intel-macos-v0.21.7-r2
         type: string
       asset_name:
         description: Exact DMG filename (r2 uses Hermes-Setup-0.21.7-r2-mac-x64.dmg)
         required: true
-        default: Hermes-Setup-0.21.7-mac-x64.dmg
+        default: Hermes-Setup-0.21.7-r2-mac-x64.dmg
         type: string
 
 permissions:
@@ -30,8 +30,8 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 10
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || 'intel-macos-v0.21.7-r1' }}
-      ASSET_NAME: ${{ inputs.asset_name || 'Hermes-Setup-0.21.7-mac-x64.dmg' }}
+      RELEASE_TAG: ${{ inputs.release_tag || 'intel-macos-v0.21.7-r2' }}
+      ASSET_NAME: ${{ inputs.asset_name || 'Hermes-Setup-0.21.7-r2-mac-x64.dmg' }}
     steps:
       - name: Record native host and validate release inputs
         shell: bash
